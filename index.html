@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Folio</title>
+<meta name="description" content="A quiet PDF reader with page and text views.">
+<meta name="theme-color" id="themeColor" content="#f6f5f1">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preload" href="literata-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ============ Library ============ -->
+<main id="library" class="library">
+  <header class="lib-head">
+    <h1 class="wordmark">Folio</h1>
+    <button id="addBtn" class="btn-quiet" type="button" aria-label="Add a PDF">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Add</span>
+    </button>
+  </header>
+
+  <div id="installBar" class="install-bar" hidden>
+    <p>Install Folio to read full screen and offline.</p>
+    <button id="installBtn" type="button" class="btn-solid small">Install</button>
+  </div>
+
+  <section id="continue" class="continue" hidden aria-label="Continue reading"></section>
+
+  <section id="shelfSection" class="shelf-section" hidden>
+    <div class="shelf-head">
+      <h2>Library</h2>
+      <button id="sortBtn" type="button" class="link-btn" aria-label="Change sort order">Recent</button>
+    </div>
+    <ul id="shelf" class="shelf"></ul>
+  </section>
+
+  <section id="empty" class="empty" hidden>
+    <div class="empty-mark" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </div>
+    <h2>Nothing on the shelf yet</h2>
+    <p>Add a PDF from your phone, or share one to Folio from Files, Drive or Gmail.</p>
+    <button id="emptyAdd" type="button" class="btn-solid">Add a PDF</button>
+  </section>
+
+  <input id="picker" type="file" accept="application/pdf,.pdf" multiple hidden>
+</main>
+
+<!-- ============ Reader ============ -->
+<section id="reader" class="reader" hidden data-r="paper" data-view="page">
+  <div id="stage" class="stage">
+    <div id="pageWrap" class="page-wrap"></div>
+    <div id="textWrap" class="text-wrap"><div id="flow" class="flow"></div></div>
+    <div id="loading" class="loading" hidden><span></span></div>
+  </div>
+
+  <div id="ribbon" class="ribbon" hidden aria-hidden="true"></div>
+
+  <footer class="status">
+    <button id="statusLeft" type="button" class="status-left" aria-label="Change progress display"></button>
+    <span id="statusRight" class="status-right"></span>
+  </footer>
+
+  <div id="dim" class="dim" aria-hidden="true"></div>
+
+  <div id="chrome" class="chrome">
+    <header class="topbar">
+      <button id="backBtn" type="button" class="icon-btn" aria-label="Back to library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <div class="topbar-title">
+        <strong id="bookTitle"></strong>
+        <span id="chapterTitle"></span>
+      </div>
+      <button id="markBtn" type="button" class="icon-btn" aria-label="Bookmark this page" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16l-5-4-5 4z"/></svg>
+      </button>
+    </header>
+
+    <div class="bottombar">
+      <button id="jumpBack" type="button" class="jump-back" hidden></button>
+      <div class="scrub">
+        <output id="scrubLabel" class="scrub-label" hidden></output>
+        <input id="scrub" type="range" min="1" max="1" value="1" aria-label="Go to page">
+      </div>
+      <div class="bar-row">
+        <button id="tocBtn" type="button" class="bar-btn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h9"/></svg>
+          <span>Contents</span>
+        </button>
+        <span id="barPage" class="bar-page"></span>
+        <button id="displayBtn" type="button" class="bar-btn">
+          <span class="aa" aria-hidden="true">Aa</span>
+          <span>Display</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- ============ Sheets ============ -->
+<div id="scrim" class="scrim" hidden></div>
+
+<section id="displaySheet" class="sheet" hidden aria-label="Display settings">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-body">
+    <div class="field">
+      <span class="field-label">View</span>
+      <div class="segmented" role="radiogroup" aria-label="View">
+        <button type="button" role="radio" data-view="page" id="viewPage">Page</button>
+        <button type="button" role="radio" data-view="text" id="viewText">Text</button>
+      </div>
+      <p class="hint" id="viewHint"></p>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Theme</span>
+      <div class="swatches" role="radiogroup" aria-label="Theme">
+        <button type="button" role="radio" data-theme="auto" class="swatch sw-auto"><i></i><span>Auto</span></button>
+        <button type="button" role="radio" data-theme="paper" class="swatch sw-paper"><i></i><span>Paper</span></button>
+        <button type="button" role="radio" data-theme="sepia" class="swatch sw-sepia"><i></i><span>Sepia</span></button>
+        <button type="button" role="radio" data-theme="night" class="swatch sw-night"><i></i><span>Night</span></button>
+      </div>
+    </div>
+
+    <div class="field text-only">
+      <span class="field-label">Text size</span>
+      <div class="stepper">
+        <button type="button" id="sizeDown" aria-label="Smaller text"><span style="font-size:14px">A</span></button>
+        <output id="sizeOut">18</output>
+        <button type="button" id="sizeUp" aria-label="Larger text"><span style="font-size:21px">A</span></button>
+      </div>
+    </div>
+
+    <div class="field text-only">
+      <span class="field-label">Typeface</span>
+      <div class="segmented" role="radiogroup" aria-label="Typeface">
+        <button type="button" role="radio" data-font="serif" class="font-serif">Literata</button>
+        <button type="button" role="radio" data-font="sans" class="font-sans">Sans</button>
+      </div>
+    </div>
+
+    <div class="field text-only">
+      <span class="field-label">Spacing</span>
+      <div class="segmented" role="radiogroup" aria-label="Line spacing">
+        <button type="button" role="radio" data-lh="1.4">Compact</button>
+        <button type="button" role="radio" data-lh="1.55">Normal</button>
+        <button type="button" role="radio" data-lh="1.75">Airy</button>
+      </div>
+    </div>
+
+    <label class="toggle page-only">
+      <span><b>Trim margins</b><small>Crops the white border so text is larger</small></span>
+      <input type="checkbox" id="trimToggle">
+    </label>
+
+    <div class="field">
+      <span class="field-label">Brightness</span>
+      <input type="range" id="bright" min="30" max="100" step="1" aria-label="Brightness">
+    </div>
+
+    <label class="toggle">
+      <span><b>Keep screen on</b><small>While a book is open</small></span>
+      <input type="checkbox" id="awakeToggle">
+    </label>
+    <label class="toggle">
+      <span><b>Hide status bar</b><small>Read edge to edge</small></span>
+      <input type="checkbox" id="fullToggle">
+    </label>
+    <label class="toggle">
+      <span><b>Page turn animation</b></span>
+      <input type="checkbox" id="animToggle">
+    </label>
+  </div>
+</section>
+
+<section id="contentsSheet" class="sheet tall" hidden aria-label="Contents and bookmarks">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="tabToc" aria-selected="true">Contents</button>
+    <button type="button" role="tab" id="tabMarks" aria-selected="false">Bookmarks</button>
+  </div>
+  <div class="sheet-body">
+    <ol id="tocList" class="toc"></ol>
+    <ul id="markList" class="marks" hidden></ul>
+  </div>
+</section>
+
+<section id="bookSheet" class="sheet" hidden aria-label="Book details">
+  <div class="sheet-grip" aria-hidden="true"></div>
+  <div class="sheet-body" id="bookSheetBody"></div>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
