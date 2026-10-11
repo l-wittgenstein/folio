@@ -20,7 +20,7 @@ const ICON_X = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M
 /* ---------------- Settings ---------------- */
 const DEFAULTS = {
   theme: 'auto', bright: 100, awake: true, full: false, anim: true,
-  size: 18, font: 'serif', lh: 1.55, status: 0, sort: 'recent',
+  size: 18, font: 'serif', lh: 1.55, scroll: false, status: 0, sort: 'recent',
   hintTaps: false, hintText: false,
 };
 const settings = { ...DEFAULTS };
@@ -369,12 +369,14 @@ picker.addEventListener('change', () => {
 const R = {
   book: null, pdf: null, reflow: null, token: 0,
   n: 1, k: 0, screens: 1, view: 'page', zoom: 1,
+  frac: 0, atEnd: false, sFirst: 1, sLast: 1, sgen: 0, marks: [],
   cache: new Map(), boxes: new Map(),
   toc: [], chapters: [], jumpFrom: null, shownAt: 0, busy: false, hasText: true,
 };
 const reader = $('reader');
 const stage = $('stage');
 const pageWrap = $('pageWrap');
+const textWrap = $('textWrap');
 const flow = $('flow');
 const N = () => R.pdf?.numPages || 1;
 const PAD_X = 12;
@@ -393,8 +395,11 @@ async function openBook(id) {
   const token = ++R.token;
   Object.assign(R, {
     book, n: clamp(book.page || 1, 1, book.pages || 1), k: 0, screens: 1, zoom: 1,
-    cache: new Map(), boxes: new Map(), toc: [], chapters: [], jumpFrom: null, busy: false,
+    frac: book.frac || 0, atEnd: false, marks: [], sgen: R.sgen + 1,
+    // Busy until the first screen is shown, so stray scroll events can't move the saved position.
+    cache: new Map(), boxes: new Map(), toc: [], chapters: [], jumpFrom: null, busy: true,
   });
+  const startFrac = book.frac || 0;
   R.view = book.view || 'page';
   reader.dataset.view = R.view;
   reader.classList.remove('chrome-on');
@@ -450,9 +455,11 @@ async function openBook(id) {
   saveSoon(book);
 
   try { await document.fonts.load(`${settings.size}px Literata`); } catch {}
-  if (R.view === 'text') await showText(R.n, { frac: book.frac || 0 });
+  if (scrollMode()) await showScroll(R.n, startFrac);
+  else if (R.view === 'text') await showText(R.n, { frac: startFrac });
   else await showPage(R.n, 0);
   if (token !== R.token) return;
+  R.busy = false;
   setLoading(false);
   afterMove();
 
@@ -470,7 +477,7 @@ function closeReader() {
   releaseWake();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   R.pdf?.destroy();
-  Object.assign(R, { book: null, pdf: null, reflow: null, cache: new Map(), boxes: new Map() });
+  Object.assign(R, { book: null, pdf: null, reflow: null, cache: new Map(), boxes: new Map(), marks: [], sgen: R.sgen + 1 });
   pageWrap.replaceChildren();
   flow.innerHTML = '';
   reader.hidden = true;
@@ -536,7 +543,7 @@ function scanBox(data, w, h) {
   let y1 = h - 1; while (y1 > y0 && rows[y1] === 0) y1--;
   let x0 = 0; while (x0 < w && cols[x0] === 0) x0++;
   let x1 = w - 1; while (x1 > x0 && cols[x1] === 0) x1--;
-  return { x0: x0 / w, y0: y0 / h, x1: (x1 + 1) / w, y1: (y1 + 1) / h };
+  return { x0: x0 / w, y0: y0 / h, x1: (x1 + 1) / w, y1: (y1 + 1) / h, rows };
 }
 
 function pageBox(n) {
@@ -595,15 +602,36 @@ function stageSize() {
   return { w: r.width || innerWidth, h: r.height || innerHeight };
 }
 
-function pageCanvas(n, { zoom = 1, area = null } = {}) {
+// For a page image inside scrolling text: the usual trimmed width, but only the inked height,
+// leaving out a running header or page number set apart in the top or bottom 9% of the page.
+async function tightCrop(n) {
+  const c = await cropFor(n);
+  const b = await pageBox(n);
+  if (!b) throw new Error('blank');
+  const rows = b.rows;
+  const h = rows.length;
+  const runs = [];
+  for (let y = 0; y < h; y++) {
+    if (!rows[y]) continue;
+    const last = runs[runs.length - 1];
+    if (last && y - last[1] <= 1) last[1] = y; else runs.push([y, y]);
+  }
+  const gap = h * 0.03;
+  while (runs.length > 1 && runs[0][1] < h * 0.09 && runs[1][0] - runs[0][1] > gap) runs.shift();
+  while (runs.length > 1 && runs[runs.length - 1][0] > h * 0.91 && runs.at(-1)[0] - runs.at(-2)[1] > gap) runs.pop();
+  if (runs.length === 1 && (runs[0][1] < h * 0.09 || runs[0][0] > h * 0.91)) throw new Error('blank');
+  return { ...c, y0: Math.max(0, runs[0][0] / h - 0.02), y1: Math.min(1, (runs.at(-1)[1] + 1) / h + 0.02) };
+}
+
+function pageCanvas(n, { zoom = 1, area = null, tight = false } = {}) {
   const box = area || (() => { const s = stageSize(); return { w: s.w - 2 * PAD_X, h: s.h - 2 * PAD_Y }; })();
-  const key = [n, zoom.toFixed(2), Math.round(box.w), Math.round(box.h), R.book.trim !== false].join('|');
+  const key = [n, zoom.toFixed(2), Math.round(box.w), Math.round(box.h), R.book.trim !== false, tight].join('|');
   if (R.cache.has(key)) return R.cache.get(key);
   const book = R.book;
   const job = (async () => {
     const page = await R.pdf.getPage(n);
     const vp1 = page.getViewport({ scale: 1 });
-    const crop = await cropFor(n);
+    const crop = tight ? await tightCrop(n) : await cropFor(n);
     const cw = vp1.width * (crop.x1 - crop.x0);
     const ch = vp1.height * (crop.y1 - crop.y0);
     const fit = Math.min(box.w / cw, box.h / ch);
@@ -670,6 +698,7 @@ function applyTextStyle() {
   reader.style.setProperty('--rfont', settings.font === 'sans' ? 'var(--sans)' : 'var(--serif)');
   // A narrow phone column justifies badly at large sizes, so switch to a ragged right edge.
   reader.style.setProperty('--ralign', settings.size <= 20 ? 'justify' : 'left');
+  reader.classList.toggle('scroll', !!settings.scroll);
 }
 
 function applyK(animate) {
@@ -683,10 +712,12 @@ async function showText(n, { frac = null, last = false, dir = 0 } = {}) {
   R.busy = true;
   try {
     const res = await R.reflow.page(n);
-    if (token !== R.token || R.n !== n || R.view !== 'text') return;
+    if (token !== R.token || R.n !== n || R.view !== 'text' || settings.scroll) return;
     const L = textLayout();
     flow.classList.add('no-anim');
     flow.classList.remove('turn-next', 'turn-prev');
+    flow.removeAttribute('style');
+    textWrap.scrollTop = 0;
     Object.assign(flow.style, {
       left: `${L.padX}px`, top: `${L.padT}px`, width: `${L.colW}px`, height: `${L.colH}px`,
       columnWidth: `${L.colW}px`, columnGap: `${L.gap}px`, transform: 'none',
@@ -697,7 +728,7 @@ async function showText(n, { frac = null, last = false, dir = 0 } = {}) {
       // Scanned page, figure or title page: show the page itself.
       flow.innerHTML = '';
       const img = await pageCanvas(n, { area: { w: L.colW, h: L.colH } }).catch(() => null);
-      if (token !== R.token || R.n !== n || R.view !== 'text') return;
+      if (token !== R.token || R.n !== n || R.view !== 'text' || settings.scroll) return;
       const fig = document.createElement('figure');
       if (img) {
         fig.appendChild(img.canvas);
@@ -717,9 +748,245 @@ async function showText(n, { frac = null, last = false, dir = 0 } = {}) {
   }
 }
 
+/* ---------------- Text view, scrolling ---------------- */
+// One long column. PDF pages are added above and below as you scroll, and an
+// empty marker span at the start of each page tracks which page you're on.
+const scrollMode = () => R.view === 'text' && !!settings.scroll;
+const live = (gen) => gen === R.sgen && !!R.book && scrollMode();
+const contentY = (el) => el.getBoundingClientRect().top - textWrap.getBoundingClientRect().top + textWrap.scrollTop;
+
+// How far through the current PDF page the reader is, from 0 to 1.
+function within() {
+  if (R.view !== 'text') return 0;
+  return settings.scroll ? R.frac : R.k / R.screens;
+}
+function atLastScreen() {
+  if (R.view !== 'text') return true;
+  return settings.scroll ? R.atEnd : R.k === R.screens - 1;
+}
+
+// The blocks of one PDF page, with its page marker at the front.
+async function pageNodes(n) {
+  const res = await R.reflow.page(n);
+  const tpl = document.createElement('template');
+  if (res.blocks.length) {
+    tpl.innerHTML = blocksToHTML(res.blocks);
+    for (const p of tpl.content.querySelectorAll('p.first')) p.classList.remove('first');
+  } else {
+    // Scanned page, figure or title page: show the inked part of the page. Blank pages take no space.
+    const img = await pageCanvas(n, { area: { w: textLayout().colW, h: 1e5 }, tight: true }).catch(() => null);
+    const el = document.createElement(img ? 'figure' : 'div');
+    if (img) {
+      el.className = 'pfig';
+      el.dataset.n = n;
+      img.canvas.classList.remove('turn-next', 'turn-prev');
+      el.appendChild(img.canvas);
+    }
+    tpl.content.appendChild(el);
+  }
+  const els = [...tpl.content.children];
+  const pm = document.createElement('span');
+  pm.className = 'pm';
+  pm.dataset.n = n;
+  els[0].prepend(pm);
+  return els;
+}
+
+// A page that starts mid-sentence carries on the paragraph that ended the page before.
+function canJoin(a, b) {
+  return a?.tagName === 'P' && b?.tagName === 'P' && b.classList.contains('cont') &&
+    a.classList.contains('note') === b.classList.contains('note');
+}
+function joinParas(a, b) {
+  const tail = a.lastChild?.nodeType === Node.TEXT_NODE ? a.lastChild : null;
+  if (tail && /[A-Za-zÀ-ÿ]-$/.test(tail.data) && /^[a-zà-ÿ]/.test(b.textContent)) tail.data = tail.data.slice(0, -1);
+  else if (tail && /­$/.test(tail.data)) tail.data = tail.data.slice(0, -1);
+  else a.append(' ');
+  a.append(...b.childNodes);
+  b.remove();
+}
+
+function placePage(n, els, atTop) {
+  if (atTop) {
+    const first = flow.firstElementChild;
+    if (canJoin(els[els.length - 1], first)) joinParas(els[els.length - 1], first);
+    flow.prepend(...els);
+    R.sFirst = n;
+  } else {
+    const last = flow.lastElementChild;
+    if (canJoin(last, els[0])) joinParas(last, els.shift());
+    flow.append(...els);
+    R.sLast = n;
+    if (n === N()) flow.insertAdjacentHTML('beforeend', '<div class="flow-end" aria-hidden="true">End</div>');
+  }
+  R.marks = [...flow.querySelectorAll('.pm')];
+}
+
+// Where marker i starts and where its page ends, in scroll coordinates.
+function markSpan(i) {
+  const m = R.marks;
+  const top = contentY(m[i]);
+  const lastEl = flow.lastElementChild;
+  const end = i + 1 < m.length ? contentY(m[i + 1]) : contentY(lastEl) + lastEl.offsetHeight;
+  return [top, Math.max(end, top + 1)];
+}
+
+// The page at the top reading line, and how far through it.
+function scrollSpot() {
+  const m = R.marks;
+  if (!m.length) return { n: R.n, frac: 0, atEnd: false };
+  const y = textWrap.scrollTop + textLayout().padT + 2;
+  let lo = 0;
+  let hi = m.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (contentY(m[mid]) <= y) lo = mid; else hi = mid - 1;
+  }
+  const [top, end] = markSpan(lo);
+  const atEnd = R.sLast === N() && textWrap.scrollTop + textWrap.clientHeight >= textWrap.scrollHeight - 4;
+  // A short last page never reaches the top line, so the bottom of the book counts as reaching it.
+  if (atEnd) return { n: N(), frac: 0.999, atEnd };
+  return { n: +m[lo].dataset.n, frac: clamp((y - top) / (end - top), 0, 0.999), atEnd };
+}
+
+async function appendPage(n, gen) {
+  const els = await pageNodes(n);
+  if (live(gen) && R.sLast === n - 1) placePage(n, els, false);
+}
+
+async function prependPage(n, gen) {
+  const els = await pageNodes(n);
+  if (!live(gen) || R.sFirst !== n + 1) return;
+  // Measure something below the insertion and scroll by however far it moves, so the text on
+  // screen stays still. The first paragraph may merge with the new page and re-wrap, so when it
+  // is on screen use the marker at the join instead.
+  const first = flow.firstElementChild;
+  const viewTop = textWrap.getBoundingClientRect().top;
+  const anchor = first.getBoundingClientRect().bottom > viewTop || !first.nextElementSibling
+    ? first.querySelector('.pm') || first
+    : first.nextElementSibling;
+  const y0 = anchor.getBoundingClientRect().top;
+  placePage(n, els, true);
+  if (anchor.isConnected) textWrap.scrollTop += anchor.getBoundingClientRect().top - y0;
+}
+
+// Keep about two screens of text loaded above and below the reading position.
+async function fillScroll() {
+  const gen = R.sgen;
+  if (R.filling === gen || !live(gen) || R.busy) return;
+  R.filling = gen;
+  try {
+    for (let i = 0; i < 24 && live(gen); i++) {
+      const h = textWrap.clientHeight;
+      const top = textWrap.scrollTop;
+      if (textWrap.scrollHeight - top - h < h * 2 && R.sLast < N()) await appendPage(R.sLast + 1, gen);
+      else if (top < h * 2 && R.sFirst > 1) await prependPage(R.sFirst - 1, gen);
+      else break;
+    }
+  } finally {
+    if (R.filling === gen) R.filling = 0;
+  }
+}
+
+// Page images far from the reading position give their memory back, keeping their space.
+function pruneFigs() {
+  const gen = R.sgen;
+  const area = { w: textLayout().colW, h: 1e5 };
+  for (const fig of flow.querySelectorAll('figure.pfig')) {
+    const n = +fig.dataset.n;
+    const c = fig.querySelector('canvas');
+    if (Math.abs(n - R.n) > 3) {
+      if (c) { fig.style.height = `${fig.offsetHeight}px`; c.remove(); }
+    } else if (!c && !fig.dataset.busy) {
+      fig.dataset.busy = '1';
+      pageCanvas(n, { area, tight: true }).then((img) => {
+        if (gen !== R.sgen || !fig.isConnected) return;
+        fig.appendChild(img.canvas);
+        fig.style.height = '';
+      }).catch(() => {}).finally(() => { delete fig.dataset.busy; });
+    }
+  }
+}
+
+async function showScroll(n, frac = 0) {
+  const gen = ++R.sgen;
+  R.busy = true;
+  try {
+    const nums = [n - 1, n, n + 1].filter((k) => k >= 1 && k <= N());
+    const pages = await Promise.all(nums.map((k) => pageNodes(k)));
+    if (!live(gen)) return;
+    const L = textLayout();
+    flow.className = 'flow';
+    flow.removeAttribute('style');
+    Object.assign(flow.style, { width: `${L.colW}px`, paddingTop: `${L.padT}px`, paddingBottom: `${L.padT * 2}px` });
+    flow.replaceChildren();
+    const at = nums.indexOf(n);
+    R.sFirst = n;
+    R.sLast = n - 1;
+    for (let i = at; i < nums.length; i++) placePage(nums[i], pages[i], false);
+    if (at > 0) placePage(n - 1, pages[0], true);
+
+    const target = () => {
+      const [top, end] = markSpan(R.marks.findIndex((el) => +el.dataset.n === n));
+      return top + frac * (end - top) - L.padT;
+    };
+    // Load a screen and a half below the target first, or the browser would clamp the scroll.
+    while (R.sLast < N() && textWrap.scrollHeight - target() < textWrap.clientHeight * 1.5) {
+      const els = await pageNodes(R.sLast + 1);
+      if (!live(gen)) return;
+      placePage(R.sLast + 1, els, false);
+    }
+    textWrap.scrollTop = target();
+    R.n = n;
+    R.frac = frac;
+    R.atEnd = scrollSpot().atEnd;
+  } finally {
+    if (gen === R.sgen) R.busy = false;
+  }
+  if (live(gen)) {
+    pruneFigs();
+    fillScroll();
+  }
+}
+
+function onScroll() {
+  R.scrollRaf = 0;
+  if (!R.book || !scrollMode() || R.busy || !R.marks.length) return;
+  const spot = scrollSpot();
+  R.frac = spot.frac;
+  R.atEnd = spot.atEnd;
+  if (spot.n !== R.n) {
+    R.n = spot.n;
+    afterMove();
+    pruneFigs();
+  } else {
+    savePosition();
+    updateStatus();
+  }
+  fillScroll();
+}
+textWrap.addEventListener('scroll', () => {
+  R.scrolledAt = performance.now();
+  if (!R.scrollRaf) R.scrollRaf = requestAnimationFrame(onScroll);
+}, { passive: true });
+
+// Tapping the edges moves a screen at a time, keeping a line and a half for context.
+function scrollStep(dir) {
+  if (R.busy) return;
+  const h = textWrap.clientHeight;
+  const line = settings.size * settings.lh;
+  if (dir > 0 && R.sLast === N() && textWrap.scrollTop + h >= textWrap.scrollHeight - 4) {
+    toast('You’ve reached the end');
+    return;
+  }
+  R.steppedAt = performance.now();
+  textWrap.scrollBy({ top: dir * Math.max(line, h - line * 1.5), behavior: settings.anim ? 'smooth' : 'auto' });
+}
+
 /* ---------------- Navigation ---------------- */
 function next() {
   if (!R.pdf) return;
+  if (scrollMode()) { scrollStep(1); return; }
   if (R.view === 'text') {
     if (R.busy) return;
     if (R.k < R.screens - 1) { R.k++; applyK(true); afterMove(); return; }
@@ -729,6 +996,7 @@ function next() {
 }
 function prev() {
   if (!R.pdf) return;
+  if (scrollMode()) { scrollStep(-1); return; }
   if (R.view === 'text') {
     if (R.busy) return;
     if (R.k > 0) { R.k--; applyK(true); afterMove(); return; }
@@ -739,13 +1007,14 @@ function prev() {
 async function go(n, { dir = 0, last = false, frac = null } = {}) {
   R.n = clamp(n, 1, N());
   R.k = 0;
-  if (R.view === 'text') await showText(R.n, { dir, last, frac });
+  if (scrollMode()) await showScroll(R.n, frac ?? (last ? 0.999 : 0));
+  else if (R.view === 'text') await showText(R.n, { dir, last, frac });
   else await showPage(R.n, dir);
   afterMove();
 }
 function jumpTo(n, frac = null) {
   if (n === R.n && frac === null) return;
-  R.jumpFrom = { n: R.n, frac: R.view === 'text' ? R.k / R.screens : 0 };
+  R.jumpFrom = { n: R.n, frac: within() };
   go(n, { frac });
 }
 
@@ -764,14 +1033,19 @@ function afterMove() {
   if (R.n !== R.lastPage) { R.lastPage = R.n; R.pageStartedAt = now; }
   R.shownAt = now;
 
-  b.page = R.n;
-  b.frac = R.view === 'text' ? R.k / R.screens : 0;
-  b.finished = R.n === N() && (R.view === 'page' || R.k === R.screens - 1) && N() > 1;
-  b.openedAt = Date.now();
-  saveSoon(b);
+  savePosition();
   updateStatus();
   updateChrome();
   prefetch();
+}
+
+function savePosition() {
+  const b = R.book;
+  b.page = R.n;
+  b.frac = within();
+  b.finished = R.n === N() && atLastScreen() && N() > 1;
+  b.openedAt = Date.now();
+  saveSoon(b);
 }
 
 function prefetch() {
@@ -854,8 +1128,8 @@ function updateStatus() {
   const b = R.book;
   if (!b) return;
   const total = N();
-  const within = R.view === 'text' ? R.k / R.screens : 0;
-  const p = R.pdf ? progressOf({ ...b, page: R.n, frac: within, finished: false, pages: total }) : progressOf(b);
+  const w = within();
+  const p = R.pdf ? progressOf({ ...b, page: R.n, frac: w, finished: false, pages: total }) : progressOf(b);
   $('statusRight').textContent = `${Math.round(p * 100)}%`;
   const modes = statusModes();
   const mode = modes[settings.status % modes.length];
@@ -866,9 +1140,9 @@ function updateStatus() {
     text = 'Learning your reading speed';
   } else if (mode === 'chapter') {
     const ch = chapterAt(R.n);
-    text = ch ? `${fmtTime((ch.end - R.n + 1 - within) * b.spp)} left in chapter` : `Page ${R.n} of ${total}`;
+    text = ch ? `${fmtTime((ch.end - R.n + 1 - w) * b.spp)} left in chapter` : `Page ${R.n} of ${total}`;
   } else {
-    text = `${fmtTime((total - R.n + 1 - within) * b.spp)} left in book`;
+    text = `${fmtTime((total - R.n + 1 - w) * b.spp)} left in book`;
   }
   $('statusLeft').textContent = text;
   $('ribbon').hidden = !b.bookmarks?.includes(R.n);
@@ -1018,6 +1292,7 @@ function syncDisplay() {
   setChecked('#displaySheet [data-font]', 'font', settings.font);
   setChecked('#displaySheet [data-lh]', 'lh', settings.lh);
   $('sizeOut').textContent = `${settings.size}`;
+  $('scrollToggle').checked = !!settings.scroll;
   $('trimToggle').checked = R.book?.trim !== false;
   $('awakeToggle').checked = settings.awake;
   $('fullToggle').checked = settings.full;
@@ -1036,15 +1311,17 @@ $('displayBtn').addEventListener('click', () => { syncDisplay(); openSheet('disp
 function relayout() {
   if (!R.pdf) return;
   R.cache = new Map();
-  if (R.view === 'text') showText(R.n, { frac: R.k / R.screens }).then(updateStatus);
+  if (scrollMode()) showScroll(R.n, within()).then(updateStatus);
+  else if (R.view === 'text') showText(R.n, { frac: within() }).then(updateStatus);
   else showPage(R.n, 0);
 }
 
 $('displaySheet').addEventListener('click', (e) => {
-  const v = e.target.closest('[data-view]')?.dataset.view;
-  const t = e.target.closest('[data-theme]')?.dataset.theme;
-  const f = e.target.closest('[data-font]')?.dataset.font;
-  const lh = e.target.closest('[data-lh]')?.dataset.lh;
+  // Buttons only: the sheet itself carries data-view, and re-syncing on every click would undo the switches.
+  const v = e.target.closest('button[data-view]')?.dataset.view;
+  const t = e.target.closest('button[data-theme]')?.dataset.theme;
+  const f = e.target.closest('button[data-font]')?.dataset.font;
+  const lh = e.target.closest('button[data-lh]')?.dataset.lh;
   if (v && v !== R.view) {
     R.view = R.book.view = v;
     reader.dataset.view = v;
@@ -1069,6 +1346,13 @@ function stepSize(d) {
 }
 $('sizeDown').addEventListener('click', () => stepSize(-1));
 $('sizeUp').addEventListener('click', () => stepSize(1));
+$('scrollToggle').addEventListener('change', (e) => {
+  const frac = within();
+  settings.scroll = e.target.checked;
+  saveSettings();
+  applyTextStyle();
+  if (R.view === 'text') go(R.n, { frac });
+});
 $('trimToggle').addEventListener('change', async (e) => {
   R.book.trim = e.target.checked;
   if (R.book.trim && !R.book.crop) R.book.crop = await computeCrop();
@@ -1118,7 +1402,10 @@ const touchMid = (e) => ({ x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
 stage.addEventListener('touchstart', (e) => {
   if (e.touches.length === 1) {
     const t = e.touches[0];
-    touch = { x: t.clientX, y: t.clientY, time: performance.now(), multi: false };
+    const now = performance.now();
+    // A touch that stops a fling isn't a tap (taps on the edges scroll, and that's fine to repeat).
+    const fling = now - (R.scrolledAt || 0) < 150 && now - (R.steppedAt || 0) > 700;
+    touch = { x: t.clientX, y: t.clientY, time: now, multi: false, fling };
   } else if (e.touches.length === 2) {
     if (touch) touch.multi = true;
     startPinch(e);
@@ -1126,6 +1413,8 @@ stage.addEventListener('touchstart', (e) => {
 }, { passive: true });
 
 stage.addEventListener('touchmove', (e) => {
+  if (!pinch && touch && scrollMode() && reader.classList.contains('chrome-on') &&
+      Math.abs(e.touches[0].clientY - touch.y) > 12) toggleChrome(false);
   if (!pinch || e.touches.length !== 2) return;
   e.preventDefault();
   const z = clamp(pinch.z0 * (touchDist(e) / pinch.d0), 1, 4);
@@ -1153,8 +1442,14 @@ stage.addEventListener('touchend', (e) => {
   const dx = t.clientX - touch.x;
   const dy = t.clientY - touch.y;
   const dt = performance.now() - touch.time;
+  const { fling } = touch;
   touch = null;
   const isTap = Math.hypot(dx, dy) < 12 && dt < 450;
+  if (scrollMode()) {
+    // Scrolling text: drags scroll natively, taps work as usual, sideways swipes do nothing.
+    if (isTap && !fling) { e.preventDefault(); tapAt(t.clientX); }
+    return;
+  }
   if (R.zoom > 1) {
     // Zoomed in: drag to pan, edges still turn the page, middle shows controls.
     if (isTap) { e.preventDefault(); tapAt(t.clientX); }

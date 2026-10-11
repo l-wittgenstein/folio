@@ -1,5 +1,5 @@
 // Folio service worker: offline app shell + receiving PDFs shared from other apps.
-const VERSION = 'folio-v1';
+const VERSION = 'folio-v2';
 const CORE = [
   './',
   './index.html',

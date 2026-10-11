@@ -2,14 +2,14 @@
 
 A quiet PDF reader for the phone, built as an installable web app.
 
-- **Text view** reflows a PDF's words into one column with adjustable size, typeface and spacing.
+- **Text view** reflows a PDF's words into one column with adjustable size, typeface and spacing. Turn pages, or switch on **Continuous scroll** under Display to scroll through the text.
 - **Page view** shows the real page with the white margins trimmed, plus pinch to zoom.
 - Paper, Sepia and Night themes, a brightness dimmer, contents, bookmarks, and time left in the chapter and book.
 - Works offline once installed. Books and reading positions stay on the phone.
 
 ## Reading
 
-- Tap the right edge or swipe left to turn the page. Tap the left edge to go back.
+- Tap the right edge or swipe left to turn the page. Tap the left edge to go back. With continuous scroll on, drag to scroll; the edges move a screen at a time.
 - Tap the middle for controls. **Display (Aa)** switches views and themes.
 - Tap the status line at the bottom to switch between page number, time left in the chapter and time left in the book.
 - Share a PDF from Files, Drive or Gmail to **Folio** to add it.
